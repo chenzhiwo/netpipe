@@ -225,6 +225,10 @@ int server_recv(int sockfd, char buf[], char esc, int len)
 	char *s = buf;
 	int slen = len;
 	int c = 0;
+
+	//首先要清空缓冲区中内容
+	memset(buf, 0, len);
+
 	do{
 		//s为接收字符的缓冲区，slen为期望获取到的字符个数，但是实际获取到的个数为c。
 		c = recv(sockfd, s, slen, 0);
@@ -259,6 +263,17 @@ int server_recv(int sockfd, char buf[], char esc, int len)
 
 
 /*-----------------------------------------------------------------------------
+ *  向相应的socket发送调试信息，同时也会在本地显示
+ *-----------------------------------------------------------------------------*/
+
+int server_logger(int socket_fd, char msg[])
+{
+	send(socket_fd, msg, strlen(msg), 0);
+	logger(msg);
+	return 0;
+}
+
+/*-----------------------------------------------------------------------------
  *  从管道读取数据的程序fork后的操作
  *-----------------------------------------------------------------------------*/
 int fork_prog_in(char *argv[])
@@ -271,27 +286,45 @@ int fork_prog_in(char *argv[])
 		return -1;
 	}
 
-	//打开管道，获得管道的描述符
-	//	fifo_read = open(FIFO_PATH, O_RDONLY | O_NONBLOCK);
-	fifo_read = open(FIFO_PATH, O_RDONLY);
-	if(fifo_read == -1)
+	int i = 0;
+	for(i = 0; argv[i] != NULL; i++)
 	{
-		error("open() fifo for read error.");
-	}
-	logger("open() fifo for read ok.");
-
-
-	//把stdin重定向到管道，那么从stdin读数据就相当与在管道中读数据了
-	if(dup2( fifo_read, fileno(stdin)) == -1)
-	{
-		error("dup2() prog_in error.");
+		logger(argv[i]);
 	}
 
-	logger("fork for prog_in ok.");
-
-	if(execvp(argv[0], argv) == -1)
+	//判断之前的实例是否还在运行，是则先杀死
+	if( (pid_in != 0) && (kill(pid_in, 0) == 0) )
 	{
-		error("fork for prog_in error.");
+		kill(pid_in, SIGTERM);
+		usleep(1000000);
+	}
+
+
+	pid_in = fork();
+	if(pid_in == 0)
+	{
+		//打开管道，获得管道的描述符
+		fifo_read = open(FIFO_PATH, O_RDONLY | O_NONBLOCK);
+		//		fifo_read = open(FIFO_PATH, O_RDONLY);
+		if(fifo_read == -1)
+		{
+			error("open() fifo for read error.");
+		}
+		logger("open() fifo for read ok.");
+
+
+		//把stdin重定向到管道，那么从stdin读数据就相当与在管道中读数据了
+		if(dup2( fifo_read, fileno(stdin)) == -1)
+		{
+			error("dup2() prog_in error.");
+		}
+
+		logger("fork for prog_in ok.");
+
+		if(execvp(argv[0], argv) == -1)
+		{
+			error("fork for prog_in error.");
+		}
 	}
 
 	return 0;
@@ -311,26 +344,43 @@ int fork_prog_out(char *argv[])
 		return -1;
 	}
 
-	//打开管道，获得管道的描述符
-	//	fifo_write = open(FIFO_PATH, O_WRONLY | O_NONBLOCK);
-	fifo_write = open(FIFO_PATH, O_WRONLY);
-	if(fifo_write == -1)
+	int i = 0;
+	for(i = 0; argv[i] != NULL; i++)
 	{
-		error("fopen() fifo for write error.");
-	}
-	logger("open() fifo for write ok.");
-
-	//把stdin重定向到管道，那么向stdin写数据就相当与向管道中写数据了
-	if(dup2(fifo_write, fileno(stdout)) == -1)
-	{
-		error("dup2() prog_out error.");
+		logger(argv[i]);
 	}
 
-	logger("fork for prog_out ok.");
-
-	if(execvp(argv[0], argv) == -1)
+	//判断之前的实例是否还在运行，是则先杀死
+	if( (pid_out != 0) && (kill(pid_out, 0) == 0) )
 	{
-		error("fork for prog_out error.");
+		kill(pid_out, SIGTERM);
+		usleep(1000000);
+	}
+
+	pid_out = fork();
+	if(pid_out == 0)
+	{
+		//打开管道，获得管道的描述符
+		fifo_write = open(FIFO_PATH, O_WRONLY | O_NONBLOCK);
+		//		fifo_write = open(FIFO_PATH, O_WRONLY);
+		if(fifo_write == -1)
+		{
+			error("fopen() fifo for write error.");
+		}
+		logger("open() fifo for write ok.");
+
+		//把stdin重定向到管道，那么向stdin写数据就相当与向管道中写数据了
+		if(dup2(fifo_write, fileno(stdout)) == -1)
+		{
+			error("dup2() prog_out error.");
+		}
+
+		logger("fork for prog_out ok.");
+
+		if(execvp(argv[0], argv) == -1)
+		{
+			error("fork for prog_out error.");
+		}
 	}
 
 	return 0;
@@ -355,6 +405,7 @@ int main(int argc, char * args[])
 			error("unlink() fifo error.");
 		}	
 	}
+
 	if(mkfifo(FIFO_PATH, FIFO_MODE) == -1)
 	{
 		error("mkfifo() error.");
@@ -364,7 +415,12 @@ int main(int argc, char * args[])
 	//	args2argv(in, prog_in_argv, " ");
 	//	char out[1024] = "nc -l 1235";
 	//	args2argv(out, prog_out_argv, " ");
+	//	fork_prog_in(prog_in_argv);
+	//	fork_prog_out(prog_out_argv);
 	//
+	//	wait(NULL);
+
+
 	//	while(1)
 	//	{
 	//		if((pid_in == 0) || (kill(pid_in, 0) != 0))
@@ -394,17 +450,71 @@ int main(int argc, char * args[])
 	server_create(&server_fd, SERVER_ADDR, SERVER_PORT);
 
 	//进入服务器循环
-	char sok[] = "ok.\n";
 	while(1)
 	{
 		int client_fd = server_accept(server_fd);
-		send(client_fd, NETPIPE_BANNERNL, sizeof(NETPIPE_BANNERNL), 0);
-		printf("recv:%d\n", server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf)));
-		send(client_fd, sok, sizeof(sok), 0);
-		printf("recv:%d\n", server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf)));
-		memset(logbuf, 0, sizeof(logbuf));
-		sprintf(logbuf, "string... %s", sockbuf);
-		send(client_fd, logbuf, sizeof(sockbuf), 0);
+		//发送欢迎信息
+		send(client_fd, NETPIPE_BANNERNL, strlen(NETPIPE_BANNERNL), 0);
+		int recv_byte = 0;
+
+		enum PROG_NUM {
+			PROG_IN,
+			PROG_OUT,
+			PROG_NONE
+		} prog_num;
+
+#define S_PROG_IN "prog_in"
+#define S_PROG_OUT "prog_out"
+#define S_ASK_PROG "which prog?\n" 
+#define S_ASK_ARGS "what args?\n"
+
+		while(1)
+		{
+			send(client_fd, S_ASK_PROG, strlen(S_ASK_PROG), 0);
+			server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf));
+
+			//把要启动的程序放到prog_num
+			if(strncmp(sockbuf, S_PROG_IN, strlen(S_PROG_IN)) == 0)
+			{
+				prog_num = PROG_IN;
+			}else if(strncmp(sockbuf, S_PROG_OUT, strlen(S_PROG_OUT)) == 0)
+			{
+				prog_num = PROG_OUT;
+			}else{
+				continue;
+			}
+
+			//把程序的参数存进sockbuf
+			send(client_fd, S_ASK_ARGS, strlen(S_ASK_ARGS), 0);
+			recv_byte = server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf));
+
+			if(recv_byte <= 1)
+			{
+				continue;
+			}
+
+			if(prog_num == PROG_IN)
+			{
+				puts(S_PROG_IN);
+				puts(sockbuf);
+				memset(prog_in_args, 0, sizeof(prog_in_args));
+				strncpy(prog_in_args, sockbuf, recv_byte);
+				args2argv(prog_in_args, prog_in_argv, " ");
+				fork_prog_in(prog_in_argv);
+			}else if(prog_num == PROG_OUT)
+			{
+				puts(S_PROG_OUT);
+				puts(sockbuf);
+				memset(prog_out_args, 0, sizeof(prog_out_args));
+				strncpy(prog_out_args, sockbuf, recv_byte);
+				args2argv(prog_out_args, prog_out_argv, " ");
+				fork_prog_out(prog_out_argv);
+			}
+
+			prog_num = 0;
+
+		}
+
 
 		close(client_fd);
 

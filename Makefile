@@ -3,7 +3,7 @@ PROG_NAME=netpipe
 CC=gcc
 CFLAGS=-O0 -Wall
 LDFLAGS=
-#CFLAGS+=-g
+CFLAGS+=-g
 
 .PHONY:clean rebuild exec
 
