@@ -3,9 +3,8 @@ PROG_NAME=netpipe
 CC=gcc
 CFLAGS=-O0 -Wall
 LDFLAGS=
-CFLAGS+=-g
 
-.PHONY:clean rebuild exec
+.PHONY:clean rebuild exec debug
 
 all:$(PROG_NAME)
 
@@ -15,9 +14,12 @@ clean:
 
 rebuild:clean all
 
-
 exec:$(PROG_NAME)
 	./$(PROG_NAME)
+
+debug:CFLAGS+=-g
+debug:rebuild all
+	gdb ./$(PROG_NAME)
 
 $(PROG_NAME):netpipe.o
 	$(CC) $^ -o $@ $(CFLAGS) $(LDFLAGS)

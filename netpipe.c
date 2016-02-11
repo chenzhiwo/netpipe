@@ -20,9 +20,10 @@
 #define SERVER_PORT 30000
 #define SERVER_BACKLOG 1
 
-//两程序之间的通讯管道
-#define FIFO_PATH "/tmp/netpipe.fifo"
-#define FIFO_MODE 0666
+//兄弟进程之间的通讯管道的fd，pipe_r和pipe_w是为了使用更加直观
+int pipe_fd[2];
+int pipe_r = 0, pipe_w;
+
 
 //记录两程序的pid
 pid_t pid_in = 0, pid_out = 0;
@@ -62,6 +63,7 @@ void logger(char log_msg[])
 	//	timenow = localtime(&now);
 	//	fprintf(stderr, "%s|->LOG:%s ", asctime(timenow), log_msg );
 	fprintf(stderr, "pid:%d |->LOG: %s\n", getpid(), log_msg );
+
 }
 
 
@@ -76,6 +78,7 @@ int signal_catch(int signal, void (*handler) (int))
 	sigemptyset(&action.sa_mask);
 	action.sa_flags = 0;
 	return sigaction(signal, &action, NULL);
+
 }
 
 
@@ -101,13 +104,6 @@ void handler_sigchld(int signal)
 void handler_exit(int signal)
 {
 	close(server_fd);
-	if(access(FIFO_PATH, F_OK) == 0)
-	{
-		if(unlink(FIFO_PATH) == -1)
-		{
-			error("unlink() fifo error.");
-		}	
-	}
 	logger("exit.");
 	exit(0);
 }
@@ -217,50 +213,85 @@ int server_accept(int socket_fd)
 
 
 /*-----------------------------------------------------------------------------
- *  从sockfd接受制定长度len的字符串到buf，可指定结束标志字符esc，返回接收的字符
- *  个数
+ *  从sockfd接受特定长度的len的字符串到buf，可指定结束标志字符esc，返回接收的字符
+ *  个数，函数返回有两种情况，情况1是接受到了esc字符，情况2是达到了期望接受的字符
  *-----------------------------------------------------------------------------*/
 int server_recv(int sockfd, char buf[], char esc, int len)
 {
+	//指向下次接收的起始位置的指针
 	char *s = buf;
+	//slen，剩余的想要接收的字符串的长度
 	int slen = len;
+	//某次接受到的字符长度
 	int c = 0;
 
 	//首先要清空缓冲区中内容
 	memset(buf, 0, len);
 
 	do{
-		//s为接收字符的缓冲区，slen为期望获取到的字符个数，但是实际获取到的个数为c。
+		//s为接收字符的缓冲区，slen为期望获取到的字符个数，实际获取到的个数为c。
 		c = recv(sockfd, s, slen, 0);
-		//判断是否已经接收完毕，是则跳出循环。
-		if( s[ c - 1 ] == esc)
-		{
-			s += c;
-			slen -= c;
-			break;
-		}
+
+		//c > 0则判断是否已经接收到结束字符
 		if(c > 0)
 		{
 			s += c;
 			slen -= c;
+			//判断是否已经接收完毕，是则跳出循环。
+			if( buf[len - slen - 1]  == esc)
+			{
+				//把结束字符esc替换成'\0'，代表字符串结束。
+				buf[len - slen - 1] = '\0';
+				break;
+			}
 		}
-	}while( (c > 0) && (slen > 0) );
-	//当c小于0时，代表发生了错误，或者是对方已关闭。
+		else if(c == 0)
+		{
+			//若对方已经关闭则返回-1
+			buf[0] = '\0';
+			logger("peer orderly shutdown.");
+			return -1;
+		}
+		else if(c == -1)
+		{
+			//若出错则直接返回错误码-1
+			buf[0] = '\0';
+			sprintf(logbuf, "recv error %s.", strerror(errno));
+			logger(logbuf);
+			return -1;
+		}
 
-	if( c < 0 )
-	{
-		//发生了错误，需要检查errno
-		return c;
-	}else if( c == 0 ){
-		//对方已关闭，返回空字符串
-		buf[0] = '\0';
-	}else{
-		//把'\n'替换成'\0'，代表字符串结束。
-		s[c - 1] = '\0';
-	}
+	}while( slen > 0 );
+
+	sprintf(logbuf, "recv:\"%s\"(%dbyte).", buf, len - slen);
+	logger(logbuf);
+
 	return len - slen;
 }
 
+
+/*-----------------------------------------------------------------------------
+ *  向指定的sockfd发送，buf中len长度的信息
+ *-----------------------------------------------------------------------------*/
+
+//int server_send(int socket_fd, char buf[], int len)
+//{
+//	if(send(socket_fd, buf, len, 0) == -1)
+//	{
+//		sprintf(logbuf, "send() error %s", strerror(errno));
+//		logger(logbuf);
+//		return -1;
+//	}
+//	return 0;
+//}
+
+#define server_send( socket_fd, buf, len) \
+	if(send(socket_fd, buf, len, 0) == -1)\
+{\
+	sprintf(logbuf, "send() error %s", strerror(errno));\
+	logger(logbuf);\
+	break;\
+}\
 
 /*-----------------------------------------------------------------------------
  *  向相应的socket发送调试信息，同时也会在本地显示
@@ -278,18 +309,10 @@ int server_logger(int socket_fd, char msg[])
  *-----------------------------------------------------------------------------*/
 int fork_prog_in(char *argv[])
 {
-	int fifo_read = 0;
-
 	if(argv[0] == NULL)
 	{
 		logger("prog in argv invalid.");
 		return -1;
-	}
-
-	int i = 0;
-	for(i = 0; argv[i] != NULL; i++)
-	{
-		logger(argv[i]);
 	}
 
 	//判断之前的实例是否还在运行，是则先杀死
@@ -303,24 +326,16 @@ int fork_prog_in(char *argv[])
 	pid_in = fork();
 	if(pid_in == 0)
 	{
-		//打开管道，获得管道的描述符
-		fifo_read = open(FIFO_PATH, O_RDONLY | O_NONBLOCK);
-		//		fifo_read = open(FIFO_PATH, O_RDONLY);
-		if(fifo_read == -1)
-		{
-			error("open() fifo for read error.");
-		}
-		logger("open() fifo for read ok.");
-
-
 		//把stdin重定向到管道，那么从stdin读数据就相当与在管道中读数据了
-		if(dup2( fifo_read, fileno(stdin)) == -1)
+		if(dup2( pipe_r, fileno(stdin)) == -1)
 		{
 			error("dup2() prog_in error.");
+		}else
+		{
+			logger("dup2() prog_in ok.");
 		}
 
-		logger("fork for prog_in ok.");
-
+		logger("fork for prog_in.");
 		if(execvp(argv[0], argv) == -1)
 		{
 			error("fork for prog_in error.");
@@ -336,47 +351,32 @@ int fork_prog_in(char *argv[])
  *-----------------------------------------------------------------------------*/
 int fork_prog_out(char *argv[])
 {
-	int fifo_write = 0;
-
 	if(argv[0] == NULL)
 	{
 		logger("prog out argv invalid.");
 		return -1;
 	}
 
-	int i = 0;
-	for(i = 0; argv[i] != NULL; i++)
-	{
-		logger(argv[i]);
-	}
-
 	//判断之前的实例是否还在运行，是则先杀死
 	if( (pid_out != 0) && (kill(pid_out, 0) == 0) )
 	{
 		kill(pid_out, SIGTERM);
-		usleep(1000000);
+		usleep(100000);
 	}
 
 	pid_out = fork();
 	if(pid_out == 0)
 	{
-		//打开管道，获得管道的描述符
-		fifo_write = open(FIFO_PATH, O_WRONLY | O_NONBLOCK);
-		//		fifo_write = open(FIFO_PATH, O_WRONLY);
-		if(fifo_write == -1)
-		{
-			error("fopen() fifo for write error.");
-		}
-		logger("open() fifo for write ok.");
-
 		//把stdin重定向到管道，那么向stdin写数据就相当与向管道中写数据了
-		if(dup2(fifo_write, fileno(stdout)) == -1)
+		if(dup2(pipe_w, fileno(stdout)) == -1)
 		{
 			error("dup2() prog_out error.");
+		}else
+		{
+			logger("dup2() prog_out ok.");
 		}
 
-		logger("fork for prog_out ok.");
-
+		logger("fork for prog_out.");
 		if(execvp(argv[0], argv) == -1)
 		{
 			error("fork for prog_out error.");
@@ -389,6 +389,18 @@ int fork_prog_out(char *argv[])
 
 int main(int argc, char * args[])
 {
+
+#define S_PROG_IN "in"
+#define S_PROG_OUT "out"
+#define S_ASK_PROG "which prog?\n"
+#define S_ASK_ARGS "what args?\n"
+
+	enum PROG_NUM {
+		PROG_IN,
+		PROG_OUT,
+		PROG_NONE
+	} prog_num;
+
 	//打印版本信息
 	logger(NETPIPE_BANNER);
 
@@ -397,57 +409,21 @@ int main(int argc, char * args[])
 	signal_catch(SIGINT, handler_exit);
 	signal_catch(SIGTERM, handler_exit);
 
-	//创建命名管道
-	if(access(FIFO_PATH, F_OK) == 0)
+	//创建兄弟进程之间的通讯管道
+	if(pipe(pipe_fd) == -1)
 	{
-		if(unlink(FIFO_PATH) == -1)
-		{
-			error("unlink() fifo error.");
-		}	
+		error("pipe() error.");
+	}else{
+		logger("pipe() ok.");
+		//pipe_r,pipe_w是为了使用更加的直观
+		pipe_r = pipe_fd[0];
+		pipe_w = pipe_fd[1];
 	}
-
-	if(mkfifo(FIFO_PATH, FIFO_MODE) == -1)
-	{
-		error("mkfifo() error.");
-	}
-
-	//	char in[1024] = "nc -l 1234";
-	//	args2argv(in, prog_in_argv, " ");
-	//	char out[1024] = "nc -l 1235";
-	//	args2argv(out, prog_out_argv, " ");
-	//	fork_prog_in(prog_in_argv);
-	//	fork_prog_out(prog_out_argv);
-	//
-	//	wait(NULL);
-
-
-	//	while(1)
-	//	{
-	//		if((pid_in == 0) || (kill(pid_in, 0) != 0))
-	//		{
-	//			pid_in = fork();
-	//			if(pid_in == 0)
-	//			{
-	//				fork_prog_in(prog_in_argv);
-	//			}
-	//		}
-	//
-	//		if((pid_out == 0) || (kill(pid_out, 0) != 0))
-	//		{
-	//			pid_out = fork();
-	//			if(pid_out == 0)
-	//			{
-	//				fork_prog_out(prog_out_argv);
-	//			}
-	//		}
-	//
-	//		wait(NULL);
-	//	}
-
 
 
 	//初始化server_fd
 	server_create(&server_fd, SERVER_ADDR, SERVER_PORT);
+
 
 	//进入服务器循环
 	while(1)
@@ -457,23 +433,14 @@ int main(int argc, char * args[])
 		send(client_fd, NETPIPE_BANNERNL, strlen(NETPIPE_BANNERNL), 0);
 		int recv_byte = 0;
 
-		enum PROG_NUM {
-			PROG_IN,
-			PROG_OUT,
-			PROG_NONE
-		} prog_num;
-
-#define S_PROG_IN "prog_in"
-#define S_PROG_OUT "prog_out"
-#define S_ASK_PROG "which prog?\n" 
-#define S_ASK_ARGS "what args?\n"
-
 		while(1)
 		{
-			send(client_fd, S_ASK_PROG, strlen(S_ASK_PROG), 0);
+			prog_num = PROG_NONE;
+			//询问需要启动的程序
+			server_send(client_fd, S_ASK_PROG, strlen(S_ASK_PROG));
 			server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf));
 
-			//把要启动的程序放到prog_num
+			//把要启动的程序记录到prog_num
 			if(strncmp(sockbuf, S_PROG_IN, strlen(S_PROG_IN)) == 0)
 			{
 				prog_num = PROG_IN;
@@ -484,8 +451,8 @@ int main(int argc, char * args[])
 				continue;
 			}
 
-			//把程序的参数存进sockbuf
-			send(client_fd, S_ASK_ARGS, strlen(S_ASK_ARGS), 0);
+			//询问程序的参数
+			server_send(client_fd, S_ASK_ARGS, strlen(S_ASK_ARGS));
 			recv_byte = server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf));
 
 			if(recv_byte <= 1)
@@ -493,30 +460,27 @@ int main(int argc, char * args[])
 				continue;
 			}
 
+			logger("client close.");
+			//在fork之前要先关闭fd，否则在fork之后就无法关闭了，这样系统就会为fork后的进程保持
+			//这个socket连接，导致断开以后无法重连
+			close(client_fd);
+
 			if(prog_num == PROG_IN)
 			{
-				puts(S_PROG_IN);
-				puts(sockbuf);
 				memset(prog_in_args, 0, sizeof(prog_in_args));
-				strncpy(prog_in_args, sockbuf, recv_byte);
+				strncpy(prog_in_args, sockbuf, sizeof(prog_in_args));
 				args2argv(prog_in_args, prog_in_argv, " ");
 				fork_prog_in(prog_in_argv);
 			}else if(prog_num == PROG_OUT)
 			{
-				puts(S_PROG_OUT);
-				puts(sockbuf);
 				memset(prog_out_args, 0, sizeof(prog_out_args));
-				strncpy(prog_out_args, sockbuf, recv_byte);
+				strncpy(prog_out_args, sockbuf, sizeof(prog_out_args));
 				args2argv(prog_out_args, prog_out_argv, " ");
 				fork_prog_out(prog_out_argv);
 			}
-
-			prog_num = 0;
+			break;
 
 		}
-
-
-		close(client_fd);
 
 	}
 
