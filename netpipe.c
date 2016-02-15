@@ -46,7 +46,7 @@ char prog_out_args[1024] = "", *prog_out_argv[64];
  *-----------------------------------------------------------------------------*/
 void error(char err_msg[])
 {
-	fprintf(stderr, "\npid:%d |->ERR: %s %s\n", getpid(), err_msg, strerror(errno));
+	fprintf(stderr, "\n%4d->ERR: %s %s\n", getpid(), err_msg, strerror(errno));
 	exit(1);
 }
 
@@ -62,7 +62,7 @@ void logger(char log_msg[])
 	//	time(&now);
 	//	timenow = localtime(&now);
 	//	fprintf(stderr, "%s|->LOG:%s ", asctime(timenow), log_msg );
-	fprintf(stderr, "pid:%d |->LOG: %s\n", getpid(), log_msg );
+	fprintf(stderr, "%4d->LOG: %s\n", getpid(), log_msg );
 
 }
 
@@ -92,7 +92,14 @@ void handler_sigchld(int signal)
 	int stat_child = 0;
 	while( ( pid_child = waitpid( -1, &stat_child, WNOHANG )) > 0)
 	{
-		sprintf(logbuf, "child %d exit status %d", pid_child, WEXITSTATUS(stat_child));
+		if(pid_child == pid_in)
+		{
+
+			sprintf(logbuf, "%s pid:%d exit status %d", "prog_in", pid_child, WEXITSTATUS(stat_child));
+		}else if(pid_child == pid_out)
+		{
+			sprintf(logbuf, "%s pid:%d exit status %d", "prog_out", pid_child, WEXITSTATUS(stat_child));
+		}
 		logger(logbuf);
 	}
 }
@@ -430,6 +437,7 @@ int main(int argc, char * args[])
 	{
 		int client_fd = server_accept(server_fd);
 		//发送欢迎信息
+		logger("--------------------");
 		send(client_fd, NETPIPE_BANNERNL, strlen(NETPIPE_BANNERNL), 0);
 		int recv_byte = 0;
 

@@ -24,5 +24,3 @@ debug:rebuild all
 $(PROG_NAME):netpipe.o
 	$(CC) $^ -o $@ $(CFLAGS) $(LDFLAGS)
 
-
-
