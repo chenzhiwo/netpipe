@@ -15,18 +15,28 @@
 #include <arpa/inet.h>
 #include "netpipe.h"
 
+//版本信息
+#define NETPIPE_BANNER "netpipe v1.0"
+#define NETPIPE_BANNERNL "netpipe v1.0\n"
+
 //socket服务器的设置
-#define SERVER_ADDR "0.0.0.0"
+#define SERVER_ADDR "000.000.000.000"
 #define SERVER_PORT 30000
 #define SERVER_BACKLOG 1
+
+//协议内容
+#define S_PROG_IN "in"
+#define S_PROG_OUT "out"
+#define S_ASK_PROG "which prog?\n"
+#define S_ASK_ARGS "what args?\n"
 
 //兄弟进程之间的通讯管道的fd，pipe_r和pipe_w是为了使用更加直观
 int pipe_fd[2];
 int pipe_r = 0, pipe_w;
 
 
-//记录两程序的pid
-pid_t pid_in = 0, pid_out = 0;
+//记录pid
+pid_t pid_in = 0, pid_out = 0, pid_main = 0;
 
 //socket服务端的描述符
 int server_fd = 0;
@@ -46,7 +56,9 @@ char prog_out_args[1024] = "", *prog_out_argv[64];
  *-----------------------------------------------------------------------------*/
 void error(char err_msg[])
 {
-	fprintf(stderr, "\n%4d->ERR: %s %s\n", getpid(), err_msg, strerror(errno));
+	fprintf(stderr, "--------------------------------------------------\n");
+	fprintf(stderr, "%4d->ERR: %s %s\n", getpid(), err_msg, strerror(errno));
+	fprintf(stderr, "--------------------------------------------------\n");
 	exit(1);
 }
 
@@ -57,16 +69,35 @@ void error(char err_msg[])
  *-----------------------------------------------------------------------------*/
 void logger(char log_msg[])
 {
-	//	time_t now;
-	//	struct tm *timenow;
-	//	time(&now);
-	//	timenow = localtime(&now);
-	//	fprintf(stderr, "%s|->LOG:%s ", asctime(timenow), log_msg );
-	fprintf(stderr, "%4d->LOG: %s\n", getpid(), log_msg );
-
+	if(getpid() == pid_main)
+	{
+		fprintf(stderr, "%4d->LOG: %s\n", getpid(), log_msg );
+	}
+	else
+	{
+		fprintf(stderr, " %4d|>LOG: %s\n", getpid(), log_msg );
+	}
 }
 
 
+/*-----------------------------------------------------------------------------
+ *  打印帮助信息然后退出
+ *-----------------------------------------------------------------------------*/
+void usage(void)
+{
+	fprintf(stderr,
+			"netpipe  [option]...\n"
+			"	-a address\n"
+			"	-p port\n"
+			"	-h usage\n"
+			"\n"
+			"example: netpipe -a 127.0.0.1 -p 1234\n"
+		   );
+	fprintf(stderr,
+			"default addr:%s port:%d\n",
+			SERVER_ADDR, SERVER_PORT);
+	exit(EXIT_FAILURE);
+}
 
 /*-----------------------------------------------------------------------------
  *  设置系统信号处理器,把handler作为signal信号的处理器。
@@ -142,7 +173,7 @@ int args2argv(char args_in[], char *argv_out[], char split[])
 
 
 /*-----------------------------------------------------------------------------
- *  把server_fd，初始化为一个被动socket
+ *  把server_fd，初始化为一个被动socket，addr和port都为主机字节序列
  *-----------------------------------------------------------------------------*/
 void server_create(int *socket_fd, char addr[], uint16_t port)
 {
@@ -167,8 +198,12 @@ void server_create(int *socket_fd, char addr[], uint16_t port)
 	//为服务器绑定一个地址
 	struct sockaddr_in sa_in = {};
 	sa_in.sin_family = AF_INET;
-	sa_in.sin_port = htons(SERVER_PORT);
-	sa_in.sin_addr.s_addr = inet_network(SERVER_ADDR);
+	sa_in.sin_port = htons(port);
+	if(inet_aton(addr, &sa_in.sin_addr) == 0)
+	{
+		error("inet_aton() error, the address is invalid.");
+	}
+
 	if(bind(*socket_fd, (struct sockaddr *) &sa_in, sizeof(sa_in)) == -1)
 	{
 		error("bind() fail.");
@@ -209,6 +244,7 @@ int server_accept(int socket_fd)
 				error("accpet() fail.");
 			}
 		}else{
+			logger("----------------------------------------");
 			sprintf(logbuf, "accept() ok, client:%s:%d.", inet_ntoa(sa_in.sin_addr), ntohs(sa_in.sin_port));
 			logger(logbuf);
 			//accept成功，跳出循环
@@ -223,7 +259,7 @@ int server_accept(int socket_fd)
  *  从sockfd接受特定长度的len的字符串到buf，可指定结束标志字符esc，返回接收的字符
  *  个数，函数返回有两种情况，情况1是接受到了esc字符，情况2是达到了期望接受的字符
  *-----------------------------------------------------------------------------*/
-int server_recv(int sockfd, char buf[], char esc, int len)
+int socket_recv(int sockfd, char buf[], char esc, int len)
 {
 	//指向下次接收的起始位置的指针
 	char *s = buf;
@@ -254,10 +290,10 @@ int server_recv(int sockfd, char buf[], char esc, int len)
 		}
 		else if(c == 0)
 		{
-			//若对方已经关闭则返回-1
+			//若对方已经关闭则返回0
 			buf[0] = '\0';
 			logger("peer orderly shutdown.");
-			return -1;
+			return 0;
 		}
 		else if(c == -1)
 		{
@@ -270,7 +306,7 @@ int server_recv(int sockfd, char buf[], char esc, int len)
 
 	}while( slen > 0 );
 
-	sprintf(logbuf, "recv:\"%s\"(%dbyte).", buf, len - slen);
+	sprintf(logbuf, "recv: \"%s\" (%dbyte).", buf, len - slen);
 	logger(logbuf);
 
 	return len - slen;
@@ -278,25 +314,25 @@ int server_recv(int sockfd, char buf[], char esc, int len)
 
 
 /*-----------------------------------------------------------------------------
- *  向指定的sockfd发送，buf中len长度的信息
+ *  向指定的sockfd发送，buf中len长度的信息，如果出错则break
  *-----------------------------------------------------------------------------*/
-
-//int server_send(int socket_fd, char buf[], int len)
-//{
-//	if(send(socket_fd, buf, len, 0) == -1)
-//	{
-//		sprintf(logbuf, "send() error %s", strerror(errno));
-//		logger(logbuf);
-//		return -1;
-//	}
-//	return 0;
-//}
 
 #define server_send( socket_fd, buf, len) \
 	if(send(socket_fd, buf, len, 0) == -1)\
 {\
 	sprintf(logbuf, "send() error %s", strerror(errno));\
 	logger(logbuf);\
+	break;\
+}\
+
+
+
+/*-----------------------------------------------------------------------------
+ *  从sockfd中接收len长度的数据到buf，如果遇到esc字符就会返回，如果出错则break
+ *-----------------------------------------------------------------------------*/
+#define server_recv(sockfd, buf, esc, len) \
+	if(socket_recv(sockfd, buf, esc, len) <= 0 )\
+{\
 	break;\
 }\
 
@@ -394,22 +430,45 @@ int fork_prog_out(char *argv[])
 }
 
 
-int main(int argc, char * args[])
+int main(int argc, char * argv[])
 {
-
-#define S_PROG_IN "in"
-#define S_PROG_OUT "out"
-#define S_ASK_PROG "which prog?\n"
-#define S_ASK_ARGS "what args?\n"
-
+	//记录要改变启动的程序
 	enum PROG_NUM {
 		PROG_IN,
 		PROG_OUT,
 		PROG_NONE
 	} prog_num;
 
+	int opt = 0;
+	//记录要监听的ip和端口
+	char addr[] = SERVER_ADDR;
+	uint16_t port = SERVER_PORT;
+	pid_main = getpid();
+
+
 	//打印版本信息
 	logger(NETPIPE_BANNER);
+
+	while( (opt = getopt(argc, argv, "a:p:h")) != -1)
+	{
+		switch (opt)
+		{
+			case 'a':
+				strncpy(addr, optarg, sizeof(addr) - 1);
+				break;
+			case 'p':
+				port = atoi(optarg);
+				break;
+			case 'h':
+				usage();
+				break;
+			case '?':
+				break;
+			default:
+				break;
+		}
+	}
+
 
 	//设置信号处理器
 	signal_catch(SIGCHLD, handler_sigchld);
@@ -427,9 +486,8 @@ int main(int argc, char * args[])
 		pipe_w = pipe_fd[1];
 	}
 
-
 	//初始化server_fd
-	server_create(&server_fd, SERVER_ADDR, SERVER_PORT);
+	server_create(&server_fd, addr, port);
 
 
 	//进入服务器循环
@@ -437,9 +495,7 @@ int main(int argc, char * args[])
 	{
 		int client_fd = server_accept(server_fd);
 		//发送欢迎信息
-		logger("--------------------");
 		send(client_fd, NETPIPE_BANNERNL, strlen(NETPIPE_BANNERNL), 0);
-		int recv_byte = 0;
 
 		while(1)
 		{
@@ -461,9 +517,9 @@ int main(int argc, char * args[])
 
 			//询问程序的参数
 			server_send(client_fd, S_ASK_ARGS, strlen(S_ASK_ARGS));
-			recv_byte = server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf));
+			server_recv(client_fd, sockbuf, '\n', sizeof(sockbuf));
 
-			if(recv_byte <= 1)
+			if(strlen(sockbuf) <= 1)
 			{
 				continue;
 			}
